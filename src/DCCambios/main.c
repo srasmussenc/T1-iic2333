@@ -16,13 +16,13 @@ typedef enum {
 // Definición de proceso
 struct Process {
     // Datos de entrada que vienen en el archivo
-    char name[64];
-    int pid;
-    int start_time;
-    int cpu_burst_time;    // duración de un burst
-    int bursts_remaining;  // cuántos bursts faltan
-    int io_wait;           // tiempo en WAITING entre bursts
-    int deadline;
+    char NOMBRE_PROCESO[64];
+    int PID;
+    int T_INICIO;
+    int T_CPU_BURST;    // duración de un burst
+    int N_BURSTS;  // cuántos bursts faltan
+    int IO_WAIT;           // tiempo en WAITING entre bursts
+    int T_DEADLINE;
 
     // Datos de simulación
     ProcessState state;
@@ -88,23 +88,23 @@ struct Process* peek(Queue* q) {
 
 // Funciones auxiliares
 struct Process* init_process(
-    char* name, int pid, int start_time, int cpu_burst_time,
-    int bursts_remaining, int io_wait, int deadline
+    char* NOMBRE_PROCESO, int PID, int T_INICIO, int T_CPU_BURST,
+    int N_BURSTS, int IO_WAIT, int T_DEADLINE
 ) {
     struct Process* p = malloc(sizeof(struct Process));
-    strncpy(p->name, name, sizeof(p->name) - 1);
-    p->name[sizeof(p->name) - 1] = '\0';
+    strncpy(p->NOMBRE_PROCESO, NOMBRE_PROCESO, sizeof(p->NOMBRE_PROCESO) - 1);
+    p->NOMBRE_PROCESO[sizeof(p->NOMBRE_PROCESO) - 1] = '\0'; //es el nombre de dicho proceso.
 
-    p->pid = pid;
-    p->start_time = start_time;
-    p->cpu_burst_time = cpu_burst_time;
-    p->bursts_remaining = bursts_remaining;
-    p->io_wait = io_wait;
-    p->deadline = deadline;
+    p->PID = PID; //es el Process ID del proceso.
+    p->T_INICIO = T_INICIO;
+    p->T_CPU_BURST = T_CPU_BURST;
+    p->N_BURSTS = N_BURSTS; //cantidad de rafagas de ejecución en la CPU que tiene el proceso. 
+    p->IO_WAIT = IO_WAIT;
+    p->T_DEADLINE = T_DEADLINE;
 
     // Estado inicial
     p->state = NEW;
-    p->time_left_in_burst = cpu_burst_time;
+    p->time_left_in_burst = T_CPU_BURST;
     p->quantum_left = 0;
     p->last_cpu_time = -1;
 
@@ -118,9 +118,9 @@ struct Process* init_process(
 }
 
 void print_process(struct Process* p) {
-    printf("PID=%d, Nombre=%s, start=%d, burst=%d, bursts=%d, io=%d, deadline=%d\n",
-           p->pid, p->name, p->start_time, p->cpu_burst_time,
-           p->bursts_remaining, p->io_wait, p->deadline);
+    printf("PID=%d, Nombre=%s, start=%d, burst=%d, bursts=%d, io=%d, T_DEADLINE=%d\n",
+           p->PID, p->NOMBRE_PROCESO, p->T_INICIO, p->T_CPU_BURST,
+           p->N_BURSTS, p->IO_WAIT, p->T_DEADLINE);
 }
 
 int main(int argc, char* argv[]) {
@@ -137,9 +137,9 @@ int main(int argc, char* argv[]) {
 
     // --- leer parámetros globales ---
     int q, K, N;
-    fscanf(f, "%d", &q);
-    fscanf(f, "%d", &K);
-    fscanf(f, "%d", &N);
+    fscanf(f, "%d", &q);  //q es el quantum asociado a cada cola
+    fscanf(f, "%d", &K);  //K es la cantidad de procesos que se van a simular
+    fscanf(f, "%d", &N);  //N es la cantidad de eventos
 
     printf("Parámetros globales: q=%d, K=%d, N=%d\n", q, K, N);
 
@@ -147,20 +147,20 @@ int main(int argc, char* argv[]) {
     struct Process* all_processes[MAX_PROCESSES];
     int total_processes = 0;
 
-    char name[64];
-    int start_time, cpu_burst_time, bursts_remaining, io_wait, extra, deadline;
+    char NOMBRE_PROCESO[64];
+    int T_INICIO, T_CPU_BURST, N_BURSTS, IO_WAIT, extra, T_DEADLINE;
 
     for (int i = 0; i < K; i++) {
         if (fscanf(f, "%s %d %d %d %d %d %d",
-                name, &start_time, &cpu_burst_time,
-                &bursts_remaining, &io_wait, &extra, &deadline) != 7) {
+                NOMBRE_PROCESO, &T_INICIO, &T_CPU_BURST,
+                &N_BURSTS, &IO_WAIT, &extra, &T_DEADLINE) != 7) {
             printf("Error al leer proceso %d\n", i);
             break;
         }
 
         struct Process* p = init_process(
-            name, total_processes, start_time,
-            cpu_burst_time, bursts_remaining, io_wait, deadline
+            NOMBRE_PROCESO, total_processes, T_INICIO,
+            T_CPU_BURST, N_BURSTS, IO_WAIT, T_DEADLINE
         );
         all_processes[total_processes++] = p;
     }
