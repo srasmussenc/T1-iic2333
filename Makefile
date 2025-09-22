@@ -48,7 +48,7 @@ LIB=$(MTH)
 COMMON=input_manager
 
 # Directorios que serán compilados a un programa
-PROGRAMS=DCControl
+PROGRAMS=DCCambios
 
 # Todos los directorios que contienen archivos de código
 SRCDIR=$(COMMON) $(PROGRAMS)
