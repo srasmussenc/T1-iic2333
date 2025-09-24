@@ -3,26 +3,17 @@
 #include <string.h>
 #include <stdbool.h>
 
-#define MAX_PROCESSES 1024
+#define MAX_PROCESSES 1000
 
-// posibles estados de un proceso
-typedef enum {
-    NEW,
-    READY,
-    RUNNING,
-    WAITING,
-    FINISHED,
-    DEAD
-} ProcessState;
+typedef enum { NEW, READY, RUNNING, WAITING, FINISHED, DEAD } ProcessState;
 
 struct Event {
     int PID;
     int T_EVENTO;
 };
-
 struct Event events[MAX_PROCESSES];
 
-// Definición de proceso
+// ------------------- Definición de proceso -------------------
 struct Process {
     char NOMBRE_PROCESO[64];
     int PID;
@@ -47,10 +38,12 @@ struct Process {
     int waiting_time;
     int interruptions;
 
-    int forced_high; // es 1 si debe entrar a high con prioridad máxima hasta que regrese al CPU
+    int forced_high; // es 1 si debe entrar a high con prioridad máxima
+    int current_queue; // 0=CPU, 1=High, 2=Low
+    int just_started; // Flag para indicar si el proceso recién entró al CPU
 };
 
-// Cola circular para procesos
+// ------------------- Cola circular -------------------
 typedef struct {
     struct Process* items[MAX_PROCESSES];
     int front;
@@ -68,27 +61,6 @@ bool is_empty(Queue* q) {
     return q->size == 0;
 }
 
-void enqueue(Queue* q, struct Process* p) {
-    if (q->size < MAX_PROCESSES) {
-        q->rear = (q->rear + 1) % MAX_PROCESSES;
-        q->items[q->rear] = p;
-        q->size++;
-    } else {
-        fprintf(stderr, "Error: cola llena\n");
-    }
-}
-
-// encolar al frente (prioridad máxima)
-void enqueue_front(Queue* q, struct Process* p) {
-    if (q->size < MAX_PROCESSES) {
-        q->front = (q->front - 1 + MAX_PROCESSES) % MAX_PROCESSES;
-        q->items[q->front] = p;
-        q->size++;
-    } else {
-        fprintf(stderr, "Error: cola llena\n");
-    }
-}
-
 struct Process* dequeue(Queue* q) {
     if (is_empty(q)) return NULL;
     struct Process* p = q->items[q->front];
@@ -98,12 +70,6 @@ struct Process* dequeue(Queue* q) {
     return p;
 }
 
-struct Process* peek(Queue* q) {
-    if (is_empty(q)) return NULL;
-    return q->items[q->front];
-}
-
-// eliminar un proceso arbitrario de la cola (si está presente)
 bool remove_from_queue(Queue* q, struct Process* p) {
     if (is_empty(q)) return false;
     struct Process* tmp[MAX_PROCESSES];
@@ -117,17 +83,62 @@ bool remove_from_queue(Queue* q, struct Process* p) {
         }
         tmp[cnt++] = q->items[pos];
     }
-    // reconstruir cola con tmp
     q->front = 0;
     q->rear = (cnt == 0) ? -1 : (cnt - 1);
     q->size = cnt;
     for (int i = 0; i < cnt; i++) q->items[i] = tmp[i];
-    // limpiar resto (opcional)
     for (int i = cnt; i < MAX_PROCESSES; i++) q->items[i] = NULL;
     return found;
 }
 
-// inicializa un proceso
+// ------------------- Prioridad -------------------
+double calc_priority(struct Process* p, int now) {
+    int bursts_restantes = p->N_BURSTS;
+    int tuntil = p->T_DEADLINE - now;
+    if (tuntil <= 0) tuntil = 1;
+    return (1.0 / (double)tuntil) + bursts_restantes;
+}
+
+void enqueue_with_priority(Queue* q, struct Process* p, int which_queue, int now) {
+    if (q->size >= MAX_PROCESSES) return;
+    double new_priority = calc_priority(p, now);
+    int insert_pos = q->size;
+    for (int i = 0; i < q->size; i++) {
+        int idx = (q->front + i) % MAX_PROCESSES;
+        struct Process* other = q->items[idx];
+        double other_priority = calc_priority(other, now);
+        if (new_priority > other_priority ||
+           (new_priority == other_priority && p->PID < other->PID)) {
+            insert_pos = i;
+            break;
+        }
+    }
+    for (int j = q->size; j > insert_pos; j--) {
+        int to = (q->front + j) % MAX_PROCESSES;
+        int from = (q->front + j - 1 + MAX_PROCESSES) % MAX_PROCESSES;
+        q->items[to] = q->items[from];
+    }
+    int pos = (q->front + insert_pos) % MAX_PROCESSES;
+    q->items[pos] = p;
+    q->rear = (q->front + q->size) % MAX_PROCESSES;
+    q->size++;
+    p->current_queue = which_queue;
+}
+
+// ------------------- Resort queue -------------------
+void resort_queue(Queue* q, int which_queue, int now) {
+    if (q->size == 0) return;
+    struct Process* temp[MAX_PROCESSES];
+    int cnt = 0;
+    while (!is_empty(q)) {
+        temp[cnt++] = dequeue(q);
+    }
+    for (int i = 0; i < cnt; i++) {
+        enqueue_with_priority(q, temp[i], which_queue, now);
+    }
+}
+
+// ------------------- Utilidades -------------------
 struct Process* init_process(
     char* NOMBRE_PROCESO, int PID, int T_INICIO, int T_CPU_BURST,
     int N_BURSTS, int IO_WAIT, int T_DEADLINE
@@ -154,16 +165,11 @@ struct Process* init_process(
     p->end_time = -1;
     p->waiting_time = 0;
     p->interruptions = 0;
-    p->io_remaining = 0;
     p->forced_high = 0;
+    p->current_queue = 0;
+    p->just_started = 0;
 
     return p;
-}
-
-void print_process(struct Process* p) {
-    printf("PID=%d, Nombre=%s, start=%d, burst=%d, bursts=%d, io=%d, DEADLINE=%d\n",
-           p->PID, p->NOMBRE_PROCESO, p->T_INICIO, p->T_CPU_BURST,
-           p->N_BURSTS, p->IO_WAIT, p->T_DEADLINE);
 }
 
 void free_all_processes(struct Process* arr[], int total) {
@@ -191,6 +197,15 @@ int cmp_events(const void* a, const void* b) {
     return ea->PID - eb->PID;
 }
 
+int cmp_processes(const void* a, const void* b) {
+    struct Process* pa = *(struct Process**)a;
+    struct Process* pb = *(struct Process**)b;
+    return pa->PID - pb->PID;
+}
+
+// ------------------- MAIN -------------------
+int Q_GLOBAL = 0;
+
 int main(int argc, char* argv[]) {
     if (argc < 2) {
         fprintf(stderr, "Uso: %s <archivo de entrada>\n", argv[0]);
@@ -203,23 +218,17 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    // leer parámetros globales
     int q, K, N;
     if (fscanf(f, "%d", &q) != 1 ||
         fscanf(f, "%d", &K) != 1 ||
         fscanf(f, "%d", &N) != 1) {
-        fprintf(stderr, "Error: formato inicial inválido (q, K, N)\n");
+        fprintf(stderr, "Error: formato inicial inválido\n");
         fclose(f);
         return 1;
     }
-    if (K < 0 || K > MAX_PROCESSES || N < 0 || N > MAX_PROCESSES) {
-        fprintf(stderr, "Error: K o N fuera de rango (máx %d)\n", MAX_PROCESSES);
-        fclose(f);
-        return 1;
-    }
+    Q_GLOBAL = q; // guardar quantum global
     printf("Parámetros: q=%d, K=%d, N=%d\n", q, K, N);
 
-    // leer procesos
     struct Process* all_processes[MAX_PROCESSES];
     for (int i = 0; i < MAX_PROCESSES; i++) all_processes[i] = NULL;
     int total_processes = 0;
@@ -227,243 +236,228 @@ int main(int argc, char* argv[]) {
     char NOMBRE_PROCESO[64];
     int PID, T_INICIO, T_CPU_BURST, N_BURSTS, IO_WAIT, T_DEADLINE;
     for (int i = 0; i < K; i++) {
-        if (fscanf(f, "%63s %d %d %d %d %d %d",
-                   NOMBRE_PROCESO, &PID, &T_INICIO, &T_CPU_BURST,
-                   &N_BURSTS, &IO_WAIT, &T_DEADLINE) != 7) {
-            fprintf(stderr, "Error al leer proceso %d\n", i);
-            free_all_processes(all_processes, total_processes);
-            fclose(f);
-            return 1;
-        }
+        fscanf(f, "%63s %d %d %d %d %d %d",
+               NOMBRE_PROCESO, &PID, &T_INICIO, &T_CPU_BURST,
+               &N_BURSTS, &IO_WAIT, &T_DEADLINE);
         struct Process* p = init_process(NOMBRE_PROCESO, PID, T_INICIO, T_CPU_BURST, N_BURSTS, IO_WAIT, T_DEADLINE);
-        if (!p) { fprintf(stderr, "malloc falló\n"); free_all_processes(all_processes, total_processes); fclose(f); return 1; }
         all_processes[total_processes++] = p;
     }
 
-    // leer eventos
     for (int i = 0; i < N; i++) {
-        if (fscanf(f, "%d %d", &events[i].PID, &events[i].T_EVENTO) != 2) {
-            fprintf(stderr, "Error al leer evento %d\n", i);
-            free_all_processes(all_processes, total_processes);
-            fclose(f);
-            return 1;
-        }
+        fscanf(f, "%d %d", &events[i].PID, &events[i].T_EVENTO);
     }
     qsort(events, N, sizeof(events[0]), cmp_events);
     fclose(f);
 
-    // colas
     Queue high, low;
     init_queue(&high);
     init_queue(&low);
 
-    // variables del loop
     int now = 0;
     int finished_count = 0;
     int event_idx = 0;
     struct Process* running = NULL;
+    int max_event_time = N > 0 ? events[N-1].T_EVENTO : 0;
 
-    // imprimimos datos iniciales
-    printf("Procesos cargados: %d\n", total_processes);
-    for (int i = 0; i < total_processes; i++) print_process(all_processes[i]);
-
-    // loop principal (Paso 1 + eventos)
+    // ------------------- LOOP PRINCIPAL -------------------
     while (finished_count < total_processes) {
-        // 0) manejar eventos en este tick (puede haber varios con el mismo T_EVENTO)
+        // procesos nuevos at beginning to enqueue, but select later
+        for (int i = 0; i < total_processes; i++) {
+            struct Process* p = all_processes[i];
+            if (!p) continue;
+            if (p->state == NEW && p->T_INICIO <= now) {
+                printf("[tick %d] Nuevo proceso %s(PID=%d) entra a READY\n", now, p->NOMBRE_PROCESO, p->PID);
+                p->state = READY;
+                p->time_left_in_burst = p->T_CPU_BURST;
+                enqueue_with_priority(&high, p, 1, now);
+            }
+        }
+
+        // Actualizar waiting_time para procesos en READY y WAITING
+        for (int i = 0; i < total_processes; i++) {
+            struct Process* p = all_processes[i];
+            if (!p) continue;
+            if (p->state == READY || p->state == WAITING) {
+                p->waiting_time++;
+                printf("[tick %d] %s(PID=%d) waiting, waiting_time=%d\n",
+                       now, p->NOMBRE_PROCESO, p->PID, p->waiting_time);
+            }
+        }
+
+        // manejar eventos
+        bool event_handled = false;
         while (event_idx < N && events[event_idx].T_EVENTO == now) {
             int ev_pid = events[event_idx].PID;
             struct Process* target = find_process_by_pid(all_processes, total_processes, ev_pid);
-
             if (target) {
-                printf("[tick %d][EVENT] Se forzó el PID=%d (%s) a CPU\n", 
-                    now, ev_pid, target->NOMBRE_PROCESO);
+                printf("[tick %d][EVENT] Se forzó %s(PID=%d) a CPU\n", now, target->NOMBRE_PROCESO, target->PID);
 
-                // Si hay un proceso corriendo distinto, interrumpirlo
                 if (running && running->PID != ev_pid) {
-                    // interrumpir proceso actual
+                    printf("[tick %d][EVENT] Interrumpiendo %s(PID=%d)\n", now, running->NOMBRE_PROCESO, running->PID);
                     running->state = READY;
                     running->interruptions++;
-                    running->forced_high = 1; // el próximo ciclo debe entrar a high con prioridad máxima
-                    enqueue_front(&high, running); // lo ponemos al frente de high (prioridad máxima)
+                    running->forced_high = 1;
+                    enqueue_with_priority(&high, running, 1, now);
                     running = NULL;
                 }
-
-                // Forzar target al CPU: quitarlo de cualquier cola si está en ellas
                 remove_from_queue(&high, target);
                 remove_from_queue(&low, target);
-
-                // Si target estaba en WAITING, descartamos IO remaining (se fuerza)
-                if (target->state == WAITING) {
-                    target->io_remaining = 0;
-                }
-                // Si target es NEW o READY, asegurarnos que tiene time_left inicializado
+                if (target->state == WAITING) target->io_remaining = 0;
                 if (target->state == NEW) target->time_left_in_burst = target->T_CPU_BURST;
-
-                // Poner target como RUNNING (si no es el que ya estaba)
-                if (!running) {
-                    target->state = RUNNING;
-                    running = target;
-                    if (target->first_response_time == -1) target->first_response_time = now;
-                    // asignamos quantum_left (para cuando lo implementes)
-                    target->quantum_left = 2 * q; // high quantum por defecto
-                } else {
-                    // si running == target (ya lo estaba), no hacemos nada
-                }
+                target->state = RUNNING;
+                target->current_queue = 0;
+                target->forced_high = 0;
+                target->just_started = 1;
+                running = target;
+                if (target->first_response_time == -1) target->first_response_time = now;
+                target->quantum_left = 2 * Q_GLOBAL;
+                printf("[tick %d] %s(PID=%d) entra a CPU con burst=%d, quantum=%d\n",
+                       now, target->NOMBRE_PROCESO, target->PID, target->time_left_in_burst, target->quantum_left);
+                event_handled = true;
             }
             event_idx++;
         }
 
-        // 1) mover procesos que terminan IO -> READY (si io_remaining llega a 0)
+        // IO -> READY
         for (int i = 0; i < total_processes; i++) {
             struct Process* p = all_processes[i];
             if (!p) continue;
             if (p->state == WAITING) {
-                if (p->io_remaining > 0) {
-                    p->io_remaining--;
-                    if (p->io_remaining == 0) {
-                        // listo para su próxima ráfaga
-                        p->state = READY;
-                        p->time_left_in_burst = p->T_CPU_BURST;
-
-                        //esto nos asegura que el proceso interrumpido no pierda prioridad
-                        if (p->forced_high) {
-                            enqueue_front(&high, p); // entra a High con prioridad máxima
-                            p->forced_high = 0; // ya no es necesario
-                        } else {
-                            enqueue(&high, p); // entra a High
-
+                if (p->io_remaining == 0) {
+                    printf("[tick %d] %s(PID=%d) terminó IO, vuelve a READY\n", now, p->NOMBRE_PROCESO, p->PID);
+                    p->state = READY;
+                    p->time_left_in_burst = p->T_CPU_BURST;
+                    if (p->forced_high) {
+                        enqueue_with_priority(&high, p, 1, now);
+                        p->forced_high = 0;
+                    } else if (p->current_queue == 2) {
+                        enqueue_with_priority(&low, p, 2, now);
+                    } else {
+                        enqueue_with_priority(&high, p, 1, now);
                     }
+                } else {
+                    p->io_remaining--;
                 }
             }
         }
-        }
 
-        // 2) ingresar procesos que empiezan en este tick
+        // deadlines
         for (int i = 0; i < total_processes; i++) {
             struct Process* p = all_processes[i];
             if (!p) continue;
-            if (p->state == NEW && p->T_INICIO == now) {
-                p->state = READY;
-                p->time_left_in_burst = p->T_CPU_BURST;
-                enqueue(&high, p);
+            if (p->state != FINISHED && p->state != DEAD) {
+                if (now >= p->T_DEADLINE) {
+                    p->state = DEAD;
+                    p->end_time = now + 1;
+                    finished_count++;
+                    remove_from_queue(&high, p);
+                    remove_from_queue(&low, p);
+                    if (running == p) running = NULL;
+                    printf("[tick %d] DEADLINE: %s(PID=%d) murió\n", now, p->NOMBRE_PROCESO, p->PID);
+                }
             }
         }
 
-        // 3) si no hay proceso corriendo, elegir uno desde High -> Low
+        // ejecutar un tick
+        if (running) {
+            printf("[tick %d] %s(PID=%d) ejecutando, burst antes=%d\n",
+                   now, running->NOMBRE_PROCESO, running->PID, running->time_left_in_burst);
+            if (running->just_started) {
+                running->just_started = 0;
+            } else {
+                running->time_left_in_burst--;
+                running->quantum_left--;
+                // if (running->first_response_time == -1) running->first_response_time = now;
+                printf("[tick %d] %s(PID=%d) burst después=%d, quantum=%d\n",
+                       now, running->NOMBRE_PROCESO, running->PID, running->time_left_in_burst, running->quantum_left);
+                if (running->time_left_in_burst <= 0) {
+                    running->N_BURSTS--;
+                    if (running->N_BURSTS <= 0) {
+                        running->state = FINISHED;
+                        running->end_time = now;
+                        finished_count++;
+                        printf("[tick %d] %s(PID=%d) FINALIZÓ proceso completo\n", now, running->NOMBRE_PROCESO, running->PID);
+                    } else {
+                        running->state = WAITING;
+                        running->io_remaining = running->IO_WAIT;
+                        running->interruptions++;
+                        printf("[tick %d] %s(PID=%d) terminó ráfaga, pasa a WAITING\n", now, running->NOMBRE_PROCESO, running->PID);
+                    }
+                    running->last_cpu_time = now;
+                    running = NULL;
+                } else if (running->quantum_left <= 0) {
+                    running->state = READY;
+                    running->interruptions++;
+                    running->last_cpu_time = now;
+                    enqueue_with_priority(&low, running, 2, now);
+                    running = NULL;
+                }
+            }
+        }
+
+        // promoción Low->High
+        for (int i = 0; i < total_processes; i++) {
+            struct Process* p = all_processes[i];
+            if (!p) continue;
+            if (p->state == READY && p->current_queue == 2) {
+                if (2 * p->T_DEADLINE < (now - p->last_cpu_time)) {
+                    printf("[tick %d] PROMOCIÓN: %s(PID=%d) sube de Low a High\n", now, p->NOMBRE_PROCESO, p->PID);
+                    remove_from_queue(&low, p);
+                    enqueue_with_priority(&high, p, 1, now);
+                }
+            }
+        }
+
+        // resort queues
+        resort_queue(&high, 1, now);
+        resort_queue(&low, 2, now);
+
+        // elegir proceso
+        // elegir proceso
         if (!running) {
             if (!is_empty(&high)) {
                 running = dequeue(&high);
-                running->quantum_left = 2 * q; // high quantum
+                running->quantum_left = 2 * Q_GLOBAL;
             } else if (!is_empty(&low)) {
                 running = dequeue(&low);
-                running->quantum_left = q; // low quantum
+                running->quantum_left = Q_GLOBAL;
             }
-
             if (running) {
                 running->state = RUNNING;
+                running->just_started = 1;
+                running->forced_high = 0;
+
+                // FIX: registrar FIRST RESPONSE al entrar al CPU
                 if (running->first_response_time == -1) running->first_response_time = now;
+
+                printf("[tick %d] %s(PID=%d) entra a CPU con burst=%d, quantum=%d\n",
+                    now, running->NOMBRE_PROCESO, running->PID, running->time_left_in_burst, running->quantum_left);
             }
-        }
+}
 
-        // 4) ejecutar 1 tick del proceso en CPU
-        if (running) {
-            running->time_left_in_burst--;
-            running->quantum_left--; // no se usa para democión aún
 
-            // opcion 1: si terminó la ráfaga actual
-            if (running->time_left_in_burst <= 0) {
-                running->N_BURSTS--;
+        // imprimir estado de colas cada tick
+        printf("[tick %d] Estado: RUNNING=%s | High=%d | Low=%d\n",
+               now, running ? running->NOMBRE_PROCESO : "ninguno", high.size, low.size);
 
-                if (running->N_BURSTS <= 0) {
-                    // proceso terminó completamente
-                    running->state = FINISHED;
-                    running->end_time = now + 1; // terminó al final del tick
-                    finished_count++;
-                } else {
-                    // todavía quedan ráfagas -> va a WAITING por IO_WAIT
-                    running->state = WAITING;
-                    running->io_remaining = running->IO_WAIT;
-                    running->interruptions++; // cuenta como interrupción
-                }
-                running = NULL; // CPU queda libre
-
-            // opcion 2: se acabó quantum pero aun queda ráfaga
-            } else if (running->quantum_left <= 0) {
-                running->state = READY;
-                running->interruptions++;
-                enqueue(&low, running); // baja a Low
-                running = NULL; // CPU queda libre       
-            }
-            // opcion 3: sigue corriendo (nada que hacer)
-        }
-
-        // 5) actualizar waiting_time (READY + WAITING)
-        for (int i = 0; i < total_processes; i++) {
-            struct Process* p = all_processes[i];
-            if (!p) continue;
-            if (p->state == READY) p->waiting_time++;
-        }
-
-        // --- DEBUG LOGS ---
-        printf("[tick %d] ", now);
-        if (running) {
-            printf("RUNNING: %s(PID=%d, burst_left=%d, quantum_left=%d) ",
-                running->NOMBRE_PROCESO, running->PID,
-                running->time_left_in_burst, running->quantum_left);
-        } else {
-            printf("CPU libre ");
-        }
-
-        printf("| READY high=%d low=%d\n", high.size, low.size);
-
-        // Mostrar procesos en High
-        printf("   High queue: ");
-        for (int i = 0; i < high.size; i++) {
-            int idx = (high.front + i) % MAX_PROCESSES;
-            struct Process* p = high.items[idx];
-            if (p) printf("%s(PID=%d,q_left=%d) ", p->NOMBRE_PROCESO, p->PID, p->quantum_left);
-        }
-        printf("\n");
-
-        // Mostrar procesos en Low
-        printf("   Low queue: ");
-        for (int i = 0; i < low.size; i++) {
-            int idx = (low.front + i) % MAX_PROCESSES;
-            struct Process* p = low.items[idx];
-            if (p) printf("%s(PID=%d,q_left=%d) ", p->NOMBRE_PROCESO, p->PID, p->quantum_left);
-        }
-        printf("\n");
-        // --- FIN DEBUG LOGS ---
-
-        // 6) avanzar tiempo
         now++;
-        if (now > 10 * 1000 * 1000) { // guard
-            fprintf(stderr, "Timeout: many ticks, aborting\n");
-            break;
-        }
-    } // end while
+    }
+    // ------------------- FIN SIMULACIÓN -------------------
 
-    // imprimir resumen simple
     printf("\nSimulación finalizada en tick %d\n", now);
+    qsort(all_processes, total_processes, sizeof(struct Process*), cmp_processes);
     printf("Nombre,PID,Estado,Interrupts,Turnaround,Response,Waiting\n");
     for (int i = 0; i < total_processes; i++) {
         struct Process* p = all_processes[i];
         if (!p) continue;
-        const char* estado = (p->state == FINISHED) ? "FINISHED" : (p->state==DEAD) ? "DEAD" : "OTHER";
+        const char* estado = (p->state == FINISHED) ? "FINISHED" :
+                             (p->state == DEAD) ? "DEAD" : "OTHER";
         int turnaround = (p->end_time == -1) ? -1 : (p->end_time - p->T_INICIO);
         int response = (p->first_response_time == -1) ? -1 : (p->first_response_time - p->T_INICIO);
         printf("%s,%d,%s,%d,%d,%d,%d\n",
                p->NOMBRE_PROCESO, p->PID, estado, p->interruptions, turnaround, response, p->waiting_time);
     }
 
-    // liberar memoria
     free_all_processes(all_processes, total_processes);
-
     return 0;
 }
-
-
-
-
-
-
