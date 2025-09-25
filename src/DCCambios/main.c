@@ -260,7 +260,7 @@ int main(int argc, char* argv[]) {
     int max_event_time = N > 0 ? events[N-1].T_EVENTO : 0;
 
     // ------------------- LOOP PRINCIPAL -------------------
-    while (finished_count < total_processes) {
+    while (finished_count < total_processes || now <= max_event_time) {
         // procesos nuevos at beginning to enqueue, but select later
         for (int i = 0; i < total_processes; i++) {
             struct Process* p = all_processes[i];
